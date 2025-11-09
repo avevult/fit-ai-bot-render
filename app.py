@@ -21,7 +21,7 @@ from starlette.responses import PlainTextResponse
 # 1. КОНСТАНТЫ И НАСТРОЙКИ
 # =================================================================
 
-# Эти значения будут взяты из Environment Variables на Render
+# Переменные окружения, которые ты задал на Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN") 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY") 
 
@@ -39,20 +39,14 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # =================================================================
-# 2. ИНИЦИАЛИЗАЦИЯ PTB
+# 2. ИНИЦИАЛИЗАЦИЯ PTB И СЕССИЙ
 # =================================================================
 
-# Создание Application
 persistence = PicklePersistence(filepath="fit_ai_persistence")
 
-# Убираем .updater(None) и делаем простой build, т.к. мы используем Starlette для Webhook
+# Создаем application в глобальной области видимости
 application = Application.builder().token(TELEGRAM_TOKEN).arbitrary_callback_data(True).persistence(persistence).build()
 application.initialize() 
-
-
-# =================================================================
-# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (Логика сессий)
-# =================================================================
 
 def get_chat_session(chat_id, context: ContextTypes.DEFAULT_TYPE):
     """Получает или создает сессию Gemini для чата (СИНХРОННО)."""
@@ -60,6 +54,7 @@ def get_chat_session(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
     if SESSION_KEY not in context.chat_data:
         logger.info(f"[{chat_id}] Создание новой сессии Gemini...")
+        # Создаем новую сессию
         chat = client.chats.create(
             model=MODEL_NAME,
             config={'system_instruction': SYSTEM_INSTRUCTION}
@@ -70,19 +65,19 @@ def get_chat_session(chat_id, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =================================================================
-# 4. ФУНКЦИИ PTB (Обработчики сообщений) - АСИНХРОННЫЕ
+# 3. ФУНКЦИИ PTB (Обработчики сообщений) - АСИНХРОННЫЕ
 # =================================================================
 
 async def start_or_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик для /start и /reset (АСИНХРОННЫЙ)."""
+    """Обработчик /start и /reset."""
     chat_id = update.effective_chat.id
     
-    # Сброс сессии
+    # Сброс сессии для перезапуска чата
     if 'gemini_session' in context.chat_data:
         del context.chat_data['gemini_session']
         logger.info(f"[{chat_id}] Сессия Gemini сброшена.")
 
-    get_chat_session(chat_id, context) # Пересоздаем сессию
+    get_chat_session(chat_id, context)
     
     await update.message.reply_text(
         "👋 Привет! Я твой **FIT AI**. Я помогу тебе с фитнесом и питанием. Для начала, расскажи о своих **целях**, **ограничениях** (если есть) и **месте тренировок**.", 
@@ -90,7 +85,7 @@ async def start_or_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Основной обработчик сообщений (АСИНХРОННЫЙ)."""
+    """Основной обработчик текстовых сообщений."""
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
@@ -99,12 +94,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action('typing')
     
     try:
-        # !!! ИСПОЛЬЗУЕМ to_thread для запуска синхронного клиента Gemini !!!
-        # Это гарантирует, что главный поток Webhook не будет заблокирован
+        # Запуск синхронного вызова Gemini в отдельном потоке (to_thread)
         response = await asyncio.to_thread(chat_session.send_message, user_text)
         final_answer = response.text
         
-        # Разбиваем ответ на части и отправляем
+        # Отправляем ответ, разбивая на части (если он очень длинный)
         chunks = textwrap.wrap(final_answer, 4000, replace_whitespace=False)
         for chunk in chunks:
             await update.message.reply_text(chunk, parse_mode='Markdown')
@@ -122,7 +116,7 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 
 
 # =================================================================
-# 5. ФУНКЦИИ STARLETTE (ASGI Web App) - АСИНХРОННЫЙ РОУТ
+# 4. ФУНКЦИИ STARLETTE (ASGI Web App) - АСИНХРОННЫЙ РОУТ
 # =================================================================
 
 async def start_page(request):
@@ -130,8 +124,8 @@ async def start_page(request):
     return PlainTextResponse('FIT AI Webhook ASGI is running!', 200)
 
 async def set_webhook_route(request):
-    """Установка вебхука (АСИНХРОННАЯ)."""
-    # Render предоставляет имя хоста в переменной RENDER_EXTERNAL_HOSTNAME
+    """Роут для установки вебхука."""
+    # Получаем публичный адрес из переменной Render
     HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not HOSTNAME:
         return PlainTextResponse("Ошибка: Переменная RENDER_EXTERNAL_HOSTNAME не найдена.", 500)
@@ -139,7 +133,7 @@ async def set_webhook_route(request):
     WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
     
     try:
-        # Устанавливаем полный URL для Webhook
+        # Устанавливаем Webhook через Telegram API
         await application.bot.set_webhook(url=WEBHOOK_URL)
         return PlainTextResponse("Webhook установлен успешно!", 200)
     except Exception as e:
@@ -147,11 +141,11 @@ async def set_webhook_route(request):
         return PlainTextResponse(f"Ошибка Telegram API: {e}", 500)
 
 async def webhook_route(request):
-    """Принимает JSON-обновление от Telegram."""
+    """Роут для приема обновлений от Telegram."""
     if request.method == "POST":
         try:
             body = await request.json()
-            # process_update теперь асинхронный и должен вызываться через await
+            # Обрабатываем входящее обновление
             await application.process_update(
                 Update.de_json(body, application.bot)
             )
@@ -169,5 +163,5 @@ routes = [
     Route("/webhook", endpoint=webhook_route, methods=["POST"]),
 ]
 
-# Глобальный псевдоним для Uvicorn
+# Глобальный псевдоним для Uvicorn, объявленный в конце
 application_pa = Starlette(routes=routes)
