@@ -1,0 +1,5 @@
+python-telegram-bot[web]~=20.0 
+google-genai
+flask
+gunicorn
+uvicorn
