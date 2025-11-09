@@ -45,8 +45,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 persistence = PicklePersistence(filepath="fit_ai_persistence")
 
 # Создаем application в глобальной области видимости
+# ВНИМАНИЕ: Здесь нет вызова .initialize(), который вызывал ошибку!
 application = Application.builder().token(TELEGRAM_TOKEN).arbitrary_callback_data(True).persistence(persistence).build()
-application.initialize() 
 
 def get_chat_session(chat_id, context: ContextTypes.DEFAULT_TYPE):
     """Получает или создает сессию Gemini для чата (СИНХРОННО)."""
@@ -163,5 +163,5 @@ routes = [
     Route("/webhook", endpoint=webhook_route, methods=["POST"]),
 ]
 
-# Глобальный псевдоним для Uvicorn, объявленный в конце
+# Глобальный псевдоним для Uvicorn
 application_pa = Starlette(routes=routes)
