@@ -141,20 +141,26 @@ async def webhook():
         return "ok"
     return "Error: Method not allowed", 405
 
-# Роут для установки Webhook
+# Роут для установки Webhook - ИСПРАВЛЕН
 @flask_app.route('/set_webhook', methods=['GET'])
 async def set_webhook():
     """Установка вебхука (АСИНХРОННАЯ)."""
-    # WEBHOOK_URL будет автоматически предоставлен Render
-    WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
-    if WEBHOOK_URL:
-        try:
-            await application.bot.set_webhook(url=f"{WEBHOOK_URL}webhook")
-            return "Webhook установлен успешно!", 200
-        except Exception as e:
-            logger.error(f"Ошибка при установке Webhook: {e}")
-            return f"Ошибка при установке Webhook: {e}", 500
-    return "WEBHOOK_URL не настроен (или отсутствует RENDER_EXTERNAL_URL).", 500
+    # Render предоставляет имя хоста в переменной RENDER_EXTERNAL_HOSTNAME
+    HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    if not HOSTNAME:
+        # В случае локального тестирования или отсутствия переменной
+        return "Ошибка: Переменная RENDER_EXTERNAL_HOSTNAME не найдена.", 500
+        
+    WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
+    
+    try:
+        # Устанавливаем полный URL для Webhook
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        return "Webhook установлен успешно!", 200
+    except Exception as e:
+        logger.error(f"Ошибка при установке Webhook: {e}")
+        # Выводим ошибку Telegram, чтобы понимать, что не так
+        return f"Ошибка Telegram API: {e}", 500
 
 
 # Псевдоним для Gunicorn/uWSGI
