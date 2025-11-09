@@ -2,6 +2,7 @@ import os
 import textwrap
 import asyncio
 import logging
+import json
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -10,10 +11,11 @@ from telegram.ext import (
     ContextTypes,
     CommandHandler,
     PicklePersistence,
-    ExtBot,
 )
-from flask import Flask, request
 from google import genai
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.responses import PlainTextResponse
 
 # =================================================================
 # 1. КОНСТАНТЫ И НАСТРОЙКИ
@@ -37,16 +39,15 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # =================================================================
-# 2. ИНИЦИАЛИЗАЦИЯ FLASK И PTB
+# 2. ИНИЦИАЛИЗАЦИЯ PTB
 # =================================================================
-
-flask_app = Flask(__name__)
 
 # Создание Application
 persistence = PicklePersistence(filepath="fit_ai_persistence")
 
-application = Application.builder().token(TELEGRAM_TOKEN).updater(None).arbitrary_callback_data(True).persistence(persistence).build()
-application.initialize() # Инициализация для асинхронного роута
+# Убираем .updater(None) и делаем простой build, т.к. мы используем Starlette для Webhook
+application = Application.builder().token(TELEGRAM_TOKEN).arbitrary_callback_data(True).persistence(persistence).build()
+application.initialize() 
 
 
 # =================================================================
@@ -81,7 +82,7 @@ async def start_or_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.chat_data['gemini_session']
         logger.info(f"[{chat_id}] Сессия Gemini сброшена.")
 
-    chat_session = get_chat_session(chat_id, context)
+    get_chat_session(chat_id, context) # Пересоздаем сессию
     
     await update.message.reply_text(
         "👋 Привет! Я твой **FIT AI**. Я помогу тебе с фитнесом и питанием. Для начала, расскажи о своих **целях**, **ограничениях** (если есть) и **месте тренировок**.", 
@@ -121,47 +122,52 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 
 
 # =================================================================
-# 5. ФУНКЦИИ FLASK (Web App) - АСИНХРОННЫЙ РОУТ
+# 5. ФУНКЦИИ STARLETTE (ASGI Web App) - АСИНХРОННЫЙ РОУТ
 # =================================================================
 
-@flask_app.route('/', methods=['GET'])
-def index():
+async def start_page(request):
     """Главный роут для проверки, что Web App работает."""
-    return 'FIT AI Webhook is running!', 200
+    return PlainTextResponse('FIT AI Webhook ASGI is running!', 200)
 
-# Роут для Telegram (АСИНХРОННЫЙ)
-@flask_app.route('/webhook', methods=['POST'])
-async def webhook(): 
-    """Принимает JSON-обновление от Telegram."""
-    if request.method == "POST":
-        # process_update теперь асинхронный и должен вызываться через await
-        await application.process_update(
-            Update.de_json(request.get_json(force=True), application.bot)
-        )
-        return "ok"
-    return "Error: Method not allowed", 405
-
-# Роут для установки Webhook - ИСПРАВЛЕН
-@flask_app.route('/set_webhook', methods=['GET'])
-async def set_webhook():
+async def set_webhook_route(request):
     """Установка вебхука (АСИНХРОННАЯ)."""
     # Render предоставляет имя хоста в переменной RENDER_EXTERNAL_HOSTNAME
     HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not HOSTNAME:
-        # В случае локального тестирования или отсутствия переменной
-        return "Ошибка: Переменная RENDER_EXTERNAL_HOSTNAME не найдена.", 500
+        return PlainTextResponse("Ошибка: Переменная RENDER_EXTERNAL_HOSTNAME не найдена.", 500)
         
     WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
     
     try:
         # Устанавливаем полный URL для Webhook
         await application.bot.set_webhook(url=WEBHOOK_URL)
-        return "Webhook установлен успешно!", 200
+        return PlainTextResponse("Webhook установлен успешно!", 200)
     except Exception as e:
         logger.error(f"Ошибка при установке Webhook: {e}")
-        # Выводим ошибку Telegram, чтобы понимать, что не так
-        return f"Ошибка Telegram API: {e}", 500
+        return PlainTextResponse(f"Ошибка Telegram API: {e}", 500)
+
+async def webhook_route(request):
+    """Принимает JSON-обновление от Telegram."""
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            # process_update теперь асинхронный и должен вызываться через await
+            await application.process_update(
+                Update.de_json(body, application.bot)
+            )
+            return PlainTextResponse("ok")
+        except Exception as e:
+            logger.error(f"Ошибка обработки Webhook: {e}")
+            return PlainTextResponse("Webhook processing error", 500)
+    return PlainTextResponse("Error: Method not allowed", 405)
 
 
-# Псевдоним для Gunicorn/uWSGI
-application_pa = flask_app
+# Создание ASGI приложения с роутами
+routes = [
+    Route("/", endpoint=start_page),
+    Route("/set_webhook", endpoint=set_webhook_route),
+    Route("/webhook", endpoint=webhook_route, methods=["POST"]),
+]
+
+# Глобальный псевдоним для Uvicorn
+application_pa = Starlette(routes=routes)
